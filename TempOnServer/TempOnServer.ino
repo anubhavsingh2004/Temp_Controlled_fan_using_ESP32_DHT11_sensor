@@ -1,113 +1,153 @@
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <DHT.h>
+#include <PubSubClient.h>
+#include "DHT.h"
 
-const char *ssid = "Anubhav";
-const char *password = "anubhav123";
+// ---------- WiFi ----------
+const char* ssid = "Redmi 13 5G";       // <-- change this
+const char* password = "123456789"; // <-- change this
 
-WebServer server(80);
-DHT dht(26, DHT11);
+// ---------- MQTT ----------
+const char* mqtt_server = "10.86.156.81";  // <-- change to your PC IP running Mosquitto
+WiFiClient espClient;
+PubSubClient client(espClient);
 
-void handleRoot() {
-  char msg[1500];
+// ---------- DHT11 ----------
+#define DHTPIN 4      // GPIO4 connected to DHT11 data pin
+#define DHTTYPE DHT11 // Using DHT11 sensor
+DHT dht(DHTPIN, DHTTYPE);
 
-  snprintf(msg, 1500,
-           "<html>\
-  <head>\
-    <meta http-equiv='refresh' content='4'/>\
-    <meta name='viewport' content='width=device-width, initial-scale=1'>\
-    <link rel='stylesheet' href='https://use.fontawesome.com/releases/v5.7.2/css/all.css' integrity='sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr' crossorigin='anonymous'>\
-    <title>ESP32 DHT Server</title>\
-    <style>\
-    html { font-family: Arial; display: inline-block; margin: 0px auto; text-align: center;}\
-    h2 { font-size: 3.0rem; }\
-    p { font-size: 3.0rem; }\
-    .units { font-size: 1.2rem; }\
-    .dht-labels{ font-size: 1.5rem; vertical-align:middle; padding-bottom: 15px;}\
-    </style>\
-  </head>\
-  <body>\
-      <h2>ESP32 DHT Server!</h2>\
-      <p>\
-        <i class='fas fa-thermometer-half' style='color:#ca3517;'></i>\
-        <span class='dht-labels'>Temperature</span>\
-        <span>%.2f</span>\
-        <sup class='units'>&deg;C</sup>\
-      </p>\
-      <p>\
-        <i class='fas fa-tint' style='color:#00add6;'></i>\
-        <span class='dht-labels'>Humidity</span>\
-        <span>%.2f</span>\
-        <sup class='units'>&percnt;</sup>\
-      </p>\
-  </body>\
-</html>",
-           readDHTTemperature(), readDHTHumidity()
-          );
-  server.send(200, "text/html", msg);
-}
+// ---------- L298N ----------
+#define ENA 13   // Fan speed control (PWM)
+#define IN1 12
+#define IN2 14
 
-void setup(void) {
+// ---------- Variables ----------
+bool autoMode = true;
+bool fanStatus = false;
+float tempThreshold = 30.0; // temperature in °C to turn ON fan
 
-  Serial.begin(9600);
-  dht.begin();
-  
-  WiFi.mode(WIFI_STA);
+// ---------- WiFi Setup ----------
+void setup_wifi() {
+  delay(10);
+  Serial.println("Connecting to WiFi...");
   WiFi.begin(ssid, password);
-  Serial.println("");
-
-  // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-
-  Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(ssid);
+  Serial.println("\nWiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+}
 
-  if (MDNS.begin("esp32")) {
-    Serial.println("MDNS responder started");
+// ---------- MQTT Reconnect ----------
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32FanClient")) {
+      Serial.println("connected");
+      client.subscribe("fanSystem/command"); // topic for manual control
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
   }
-  server.on("/", handleRoot);
-
-  server.begin();
-  Serial.println("HTTP server started");
 }
 
-void loop(void) {
-  server.handleClient();
-  delay(2);//allow the cpu to switch to other tasks
+// ---------- Handle MQTT Messages ----------
+void callback(char* topic, byte* message, unsigned int length) {
+  String msg;
+  for (int i = 0; i < length; i++) {
+    msg += (char)message[i];
+  }
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  Serial.println(msg);
+
+  if (msg == "ON") {
+    autoMode = false;
+    fanOn();
+  } else if (msg == "OFF") {
+    autoMode = false;
+    fanOff();
+  } else if (msg == "AUTO") {
+    autoMode = true;
+  }
 }
 
+// ---------- Fan Control ----------
+void fanOn() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  ledcWrite(ENA, 255); // full speed (8-bit = 0–255)
+  fanStatus = true;
+  Serial.println("Fan ON");
+}
 
-float readDHTTemperature() {
-  // Sensor readings may also be up to 2 seconds
-  // Read temperature as Celsius (the default)
-  float t = dht.readTemperature();
-  if (isnan(t)) {    
+void fanOff() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  ledcWrite(ENA, 0);   // stop
+  fanStatus = false;
+  Serial.println("Fan OFF");
+}
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(115200);
+
+  // DHT
+  dht.begin();
+
+  // Fan pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  // ✅ New API (ESP32 Core v3.x)
+  ledcAttach(ENA, 1000, 8);  // pin, freq=1kHz, resolution=8bit (0–255)
+
+  // WiFi + MQTT
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+}
+
+// ---------- Loop ----------
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  if (isnan(temp) || isnan(hum)) {
     Serial.println("Failed to read from DHT sensor!");
-    return -1;
+    return;
   }
-  else {
-    Serial.println(t);
-    return t;
-  }
-}
 
-float readDHTHumidity() {
-  // Sensor readings may also be up to 2 seconds
-  float h = dht.readHumidity();
-  if (isnan(h)) {
-    Serial.println("Failed to read from DHT sensor!");
-    return -1;
+  Serial.print("Temp: ");
+  Serial.print(temp);
+  Serial.print("°C  Humidity: ");
+  Serial.print(hum);
+  Serial.println("%");
+
+  if (autoMode) {
+    if (temp > tempThreshold) {
+      fanOn();
+    } else {
+      fanOff();
+    }
   }
-  else {
-    Serial.println(h);
-    return h;
-  }
+
+  // publish to MQTT
+  client.publish("fanSystem/temperature", String(temp).c_str());
+  client.publish("fanSystem/humidity", String(hum).c_str());
+  client.publish("fanSystem/status", fanStatus ? "ON" : "OFF");
+
+  delay(2000); // every 2 seconds
 }
