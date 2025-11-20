@@ -3,11 +3,11 @@
 #include "DHT.h"
 
 // ---------- WiFi ----------
-const char* ssid = "Redmi 13 5G";       // <-- change this
-const char* password = "123456789"; // <-- change this
+const char* ssid = "Redmi 13 5G";      
+const char* password = "123456789"; 
 
 // ---------- MQTT ----------
-const char* mqtt_server = "10.86.156.81";  // <-- change to your PC IP running Mosquitto
+const char* mqtt_server = "10.138.35.82"; 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
